@@ -3,6 +3,7 @@
 // @namespace    https://github.com/Alioune05/tampermonkey-scripts
 // @version      1.0.0
 // @description  Automatically click through the Riot Games Facebook OAuth page and close on success
+// @icon         https://www.facebook.com/favicon.ico
 // @match        *://www.facebook.com/dialog/oauth*
 // @match        *://www.facebook.com/privacy/consent*
 // @match        *://www.facebook.com/login*

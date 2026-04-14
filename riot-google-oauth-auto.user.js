@@ -3,6 +3,7 @@
 // @namespace    https://github.com/Alioune05/tampermonkey-scripts
 // @version      1.0.0
 // @description  Automatically click through the Riot Games Google OAuth page and close on success
+// @icon         https://www.google.com/favicon.ico
 // @match        *://accounts.google.com/v3/signin/accountchooser*
 // @match        *://accounts.google.com/AccountChooser*
 // @match        *://accounts.google.com/signin/oauth/consent*
