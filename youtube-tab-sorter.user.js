@@ -1,9 +1,10 @@
 // ==UserScript==
 // @name         YouTube Tab Sorter
 // @namespace    https://github.com/Alioune05/tampermonkey-scripts
-// @version      1.1.0
+// @version      1.0.8
 // @description  Track and sort your YouTube videos by duration via a floating panel
-// @match        *://www.youtube.com/*
+// @match        *://www.youtube.com/watch*
+// @match        *://www.youtube.com/shorts/*
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_addValueChangeListener
@@ -263,38 +264,8 @@
   // Inject keyframe animation (textContent = safe, no Trusted Types issue)
   // ---------------------------------------------------------------------------
   const styleTag = document.createElement('style');
-  styleTag.textContent = `
-    @keyframes yts-spin { to { transform: rotate(360deg); } }
-    ytd-thumbnail { position: relative; }
-    .yts-add-btn {
-      all: unset; box-sizing: border-box; position: absolute;
-      bottom: 6px; left: 6px; width: 32px; height: 32px;
-      border-radius: 50%; background: rgba(15,15,15,0.85); color: #fff;
-      cursor: pointer; display: flex; align-items: center; justify-content: center;
-      opacity: 0; transition: opacity .15s, background .15s; z-index: 200;
-    }
-    ytd-thumbnail:hover .yts-add-btn { opacity: 1; }
-    .yts-add-btn.yts-in-list { background: rgba(76,175,80,0.9); opacity: 0.7; }
-    ytd-thumbnail:hover .yts-add-btn.yts-in-list { opacity: 1; }
-    .yts-add-btn:not(.yts-in-list):hover { background: rgba(200,0,0,0.9); }
-  `;
+  styleTag.textContent = '@keyframes yts-spin { to { transform: rotate(360deg); } }';
   document.head.appendChild(styleTag);
-
-  // ---------------------------------------------------------------------------
-  // Shared helper
-  // ---------------------------------------------------------------------------
-  function makeSvgIcon(pathD) {
-    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-    svg.setAttribute('width', '16');
-    svg.setAttribute('height', '16');
-    svg.setAttribute('viewBox', '0 0 24 24');
-    svg.setAttribute('fill', 'currentColor');
-    svg.style.pointerEvents = 'none';
-    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-    path.setAttribute('d', pathD);
-    svg.appendChild(path);
-    return svg;
-  }
 
   // ---------------------------------------------------------------------------
   // Build UI
@@ -361,6 +332,19 @@
       font-size:16px; transition:background 0.15s;
       background:${active ? '#ff0000' : '#1e1e1e'}; color:${active ? '#fff' : '#aaa'};`;
 
+    function makeSvgIcon(pathD) {
+      const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      svg.setAttribute('width', '16');
+      svg.setAttribute('height', '16');
+      svg.setAttribute('viewBox', '0 0 24 24');
+      svg.setAttribute('fill', 'currentColor');
+      svg.style.pointerEvents = 'none';
+      const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      path.setAttribute('d', pathD);
+      svg.appendChild(path);
+      return svg;
+    }
+
     // ASC  = lignes croissantes + flèche vers le bas (court → long)
     const ICON_ASC  = 'M4 6h8v2H4zm0 4h12v2H4zm0 4h16v2H4zm11 4l4-4h-3v-3h-2v3h-3z';
     // DESC = lignes décroissantes + flèche vers le haut (long → court)
@@ -380,7 +364,7 @@
     const btnPrev = document.createElement('button');
     btnPrev.setAttribute('style', iconBtnStyle(false));
     btnPrev.title = 'Previous (Shift+P)';
-    btnPrev.appendChild(makeSvgIcon('M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z'));
+    btnPrev.appendChild(makeSvgIcon('M6 6h2v12H6zm3.5 6 8.5 6V6z'));
 
     // Skip+Remove (Shift+N): go to next and remove current from list
     const btnSkipRemove = document.createElement('button');
@@ -717,74 +701,6 @@
   }
 
   // ---------------------------------------------------------------------------
-  // Inject "add to list" button on thumbnails (homepage, search, etc.)
-  // ---------------------------------------------------------------------------
-  const ICON_PLUS  = 'M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z';
-  const ICON_CHECK = 'M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z';
-
-  function injectAddButtons() {
-    document.querySelectorAll('ytd-thumbnail:not([data-yts])').forEach(thumb => {
-      const link = thumb.querySelector('a#thumbnail[href]');
-      if (!link) return;
-
-      let vid = null;
-      try {
-        const url = new URL(link.href);
-        if (url.pathname.startsWith('/shorts/')) {
-          vid = url.pathname.split('/shorts/')[1].split('/')[0] || null;
-        } else {
-          vid = url.searchParams.get('v');
-        }
-      } catch (_) {}
-      if (!vid) return;
-
-      thumb.setAttribute('data-yts', '1');
-
-      const addBtn = document.createElement('button');
-      addBtn.className = 'yts-add-btn';
-
-      function updateBtnState() {
-        const inList = !!loadStore()[vid];
-        addBtn.classList.toggle('yts-in-list', inList);
-        addBtn.title = inList ? 'Remove from Tab Sorter' : 'Add to Tab Sorter';
-        addBtn.replaceChildren(makeSvgIcon(inList ? ICON_CHECK : ICON_PLUS));
-      }
-      updateBtnState();
-
-      addBtn.addEventListener('click', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        const store = loadStore();
-        if (store[vid]) {
-          delete store[vid];
-          saveStore(store);
-          updateBtnState();
-          return;
-        }
-        const card = thumb.closest([
-          'ytd-rich-item-renderer', 'ytd-video-renderer',
-          'ytd-compact-video-renderer', 'ytd-grid-video-renderer',
-        ].join(','));
-        const title   = card?.querySelector('#video-title')?.textContent?.trim() || vid;
-        const channel = card?.querySelector('#channel-name a, .ytd-channel-name a')?.textContent?.trim() || '';
-        const durEl   = thumb.querySelector('.badge-shape-wiz__text, span.ytd-thumbnail-overlay-time-status-renderer');
-        let duration  = null;
-        if (durEl) {
-          const parts = durEl.textContent.trim().split(':').map(Number);
-          if (parts.length === 3) duration = parts[0] * 3600 + parts[1] * 60 + parts[2];
-          else if (parts.length === 2) duration = parts[0] * 60 + parts[1];
-        }
-        const isShort = link.href.includes('/shorts/');
-        store[vid] = { vid, title, channel, duration, isShort, ts: Date.now() };
-        saveStore(store);
-        updateBtnState();
-      });
-
-      thumb.appendChild(addBtn);
-    });
-  }
-
-  // ---------------------------------------------------------------------------
   // Init + SPA navigation
   // ---------------------------------------------------------------------------
   let uiBtn = null, uiPanel = null, renderListFn = null;
@@ -803,15 +719,6 @@
   registerCurrentVideo();
   attachEndedListener();
   updateDot();
-  injectAddButtons();
-
-  // Watch for dynamically loaded thumbnails (infinite scroll, navigation)
-  let injectTimer = null;
-  new MutationObserver(() => {
-    if (!document.querySelector('ytd-thumbnail:not([data-yts])')) return;
-    clearTimeout(injectTimer);
-    injectTimer = setTimeout(injectAddButtons, 400);
-  }).observe(document.body, { childList: true, subtree: true });
 
   document.addEventListener('yt-navigate-finish', () => {
     endedListenerAttached = false;
@@ -821,7 +728,6 @@
     // Slight delay to let registerCurrentVideo save first
     setTimeout(() => {
       updateDot();
-      injectAddButtons();
       // Re-render and scroll to current video if panel is open
       if (GM_getValue(PANEL_KEY, false)) {
         renderListFn && renderListFn(true);
