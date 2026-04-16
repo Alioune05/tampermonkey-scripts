@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Tab Sorter
 // @namespace    https://github.com/Alioune05/tampermonkey-scripts
-// @version      1.0.7
+// @version      1.0.8
 // @description  Track and sort your YouTube videos by duration via a floating panel
 // @match        *://www.youtube.com/watch*
 // @match        *://www.youtube.com/shorts/*
@@ -216,7 +216,7 @@
           cursor:pointer; box-shadow:0 2px 8px rgba(0,0,0,0.4); white-space:nowrap;`,
 
     panel: `all:unset; box-sizing:border-box; position:fixed; top:120px; right:20px; z-index:${Z};
-            width:360px; background:#0f0f0f; color:#f1f1f1; border:1px solid #333; border-radius:10px;
+            width:380px; background:#0f0f0f; color:#f1f1f1; border:1px solid #333; border-radius:10px;
             font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
             box-shadow:0 8px 28px rgba(0,0,0,0.7); overflow:hidden; display:none;`,
 
@@ -360,6 +360,12 @@
     btnPause.title = 'Pause tous les onglets';
     btnPause.appendChild(makeSvgIcon('M6 19h4V5H6v14zm8-14v14h4V5h-4z'));
 
+    // Prev (Shift+P): go to previous video without removing current
+    const btnPrev = document.createElement('button');
+    btnPrev.setAttribute('style', iconBtnStyle(false));
+    btnPrev.title = 'Previous (Shift+P)';
+    btnPrev.appendChild(makeSvgIcon('M6 6h2v12H6zm3.5 6 8.5 6V6z'));
+
     // Skip+Remove (Shift+N): go to next and remove current from list
     const btnSkipRemove = document.createElement('button');
     btnSkipRemove.setAttribute('style', iconBtnStyle(false));
@@ -402,6 +408,7 @@
     controls.appendChild(spacer);
 
     controls.appendChild(btnAutoplay);
+    controls.appendChild(btnPrev);
     controls.appendChild(btnSkipRemove);
     controls.appendChild(btnSkipKeep);
     controls.appendChild(btnPause);
@@ -556,6 +563,16 @@
     btnClear.addEventListener('click', () => {
       saveStore({});
       renderList();
+    });
+
+    btnPrev.addEventListener('click', () => {
+      const vid = currentVid();
+      if (!vid) return;
+      const store = loadStore();
+      const items = sortedItems(store, GM_getValue(ORDER_KEY, 'asc'));
+      const currentIndex = items.findIndex(v => v.vid === vid);
+      const prev = currentIndex > 0 ? items[currentIndex - 1] : items[items.length - 1];
+      if (prev && prev.vid !== vid) location.href = `https://www.youtube.com/watch?v=${prev.vid}`;
     });
 
     btnSkipRemove.addEventListener('click', () => {
@@ -757,6 +774,26 @@
 
       if (next && next.vid !== vid) {
         location.href = `https://www.youtube.com/watch?v=${next.vid}`;
+      }
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // Shortcut: Shift+P → go to previous video without removing current from list
+  // ---------------------------------------------------------------------------
+  document.addEventListener('keydown', (e) => {
+    if (e.shiftKey && e.key === 'P') {
+      const vid = currentVid();
+      if (!vid) return;
+
+      const store = loadStore();
+      const order = GM_getValue(ORDER_KEY, 'asc');
+      const items = sortedItems(store, order);
+      const currentIndex = items.findIndex(v => v.vid === vid);
+      const prev = currentIndex > 0 ? items[currentIndex - 1] : items[items.length - 1];
+
+      if (prev && prev.vid !== vid) {
+        location.href = `https://www.youtube.com/watch?v=${prev.vid}`;
       }
     }
   });
