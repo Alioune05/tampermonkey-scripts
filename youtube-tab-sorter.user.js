@@ -435,7 +435,7 @@
       btnSort.title = order === 'asc' ? 'Plus courtes en premier' : 'Plus longues en premier';
     }
 
-    function renderList() {
+    function renderList(scrollToCurrent = false) {
       const store = loadStore();
       const vid = currentVid();
       const items = sortedItems(store, order).filter(v =>
@@ -446,6 +446,7 @@
 
       listEl.textContent = '';
       updateTotal();
+      let currentItemEl = null;
 
       if (items.length === 0) {
         const empty = document.createElement('div');
@@ -507,13 +508,20 @@
         a.appendChild(info);
         a.appendChild(delBtn);
         listEl.appendChild(a);
+        if (isCurrent) currentItemEl = a;
+      }
+
+      if (scrollToCurrent && currentItemEl) {
+        requestAnimationFrame(() => {
+          listEl.scrollTop = currentItemEl.offsetTop - listEl.offsetTop;
+        });
       }
     }
 
     btn.addEventListener('click', () => {
       panel.style.display = 'block';
       btn.style.display   = 'none';
-      renderList();
+      renderList(true);
     });
 
     closeBtn.addEventListener('click', () => {
