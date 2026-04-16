@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Tab Sorter
 // @namespace    https://github.com/Alioune05/tampermonkey-scripts
-// @version      1.1.0
+// @version      1.1.1
 // @description  Track and sort your YouTube videos by duration via a floating panel
 // @match        *://www.youtube.com/*
 // @grant        GM_setValue
@@ -273,10 +273,7 @@
       cursor: pointer; display: flex; align-items: center; justify-content: center;
       opacity: 0; transition: opacity .15s, background .15s; z-index: 200;
     }
-    ytd-thumbnail:hover .yts-add-btn { opacity: 1; }
-    .yts-add-btn.yts-in-list { background: rgba(76,175,80,0.9); opacity: 0.7; }
-    ytd-thumbnail:hover .yts-add-btn.yts-in-list { opacity: 1; }
-    .yts-add-btn:not(.yts-in-list):hover { background: rgba(200,0,0,0.9); }
+    .yts-add-btn:hover { background: rgba(200,0,0,0.9) !important; }
   `;
   document.head.appendChild(styleTag);
 
@@ -722,10 +719,16 @@
   const ICON_PLUS  = 'M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z';
   const ICON_CHECK = 'M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z';
 
+  const CARD_SEL = [
+    'ytd-rich-item-renderer', 'ytd-video-renderer',
+    'ytd-compact-video-renderer', 'ytd-grid-video-renderer',
+  ].join(',');
+
   function injectAddButtons() {
     document.querySelectorAll('ytd-thumbnail:not([data-yts])').forEach(thumb => {
-      const link = thumb.querySelector('a#thumbnail[href]');
-      if (!link) return;
+      // Use the href property (not attribute) so lazy-loaded relative paths still work
+      const link = thumb.querySelector('a#thumbnail');
+      if (!link) { thumb.setAttribute('data-yts', 'skip'); return; }
 
       let vid = null;
       try {
@@ -736,6 +739,7 @@
           vid = url.searchParams.get('v');
         }
       } catch (_) {}
+      // Don't mark if no vid yet — MutationObserver will retry when content loads
       if (!vid) return;
 
       thumb.setAttribute('data-yts', '1');
@@ -747,9 +751,15 @@
         const inList = !!loadStore()[vid];
         addBtn.classList.toggle('yts-in-list', inList);
         addBtn.title = inList ? 'Remove from Tab Sorter' : 'Add to Tab Sorter';
+        addBtn.style.background = inList ? 'rgba(76,175,80,0.9)' : 'rgba(15,15,15,0.85)';
         addBtn.replaceChildren(makeSvgIcon(inList ? ICON_CHECK : ICON_PLUS));
       }
       updateBtnState();
+
+      // Use JS hover on the card — ytd-thumbnail likely has pointer-events:none
+      const card = thumb.closest(CARD_SEL) || thumb;
+      card.addEventListener('mouseenter', () => { addBtn.style.opacity = '1'; });
+      card.addEventListener('mouseleave', () => { addBtn.style.opacity = '0'; });
 
       addBtn.addEventListener('click', (e) => {
         e.preventDefault();
@@ -761,10 +771,6 @@
           updateBtnState();
           return;
         }
-        const card = thumb.closest([
-          'ytd-rich-item-renderer', 'ytd-video-renderer',
-          'ytd-compact-video-renderer', 'ytd-grid-video-renderer',
-        ].join(','));
         const title   = card?.querySelector('#video-title')?.textContent?.trim() || vid;
         const channel = card?.querySelector('#channel-name a, .ytd-channel-name a')?.textContent?.trim() || '';
         const durEl   = thumb.querySelector('.badge-shape-wiz__text, span.ytd-thumbnail-overlay-time-status-renderer');
