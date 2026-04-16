@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Tab Sorter
 // @namespace    https://github.com/Alioune05/tampermonkey-scripts
-// @version      1.0.4
+// @version      1.0.5
 // @description  Track and sort your YouTube videos by duration via a floating panel
 // @match        *://www.youtube.com/watch*
 // @match        *://www.youtube.com/shorts/*
@@ -533,12 +533,14 @@
     }
 
     btn.addEventListener('click', () => {
+      panelOpen = true;
       panel.style.display = 'block';
       btn.style.display   = 'none';
       renderList(true);
     });
 
     closeBtn.addEventListener('click', () => {
+      panelOpen = false;
       panel.style.display = 'none';
       btn.style.display   = 'flex';
     });
@@ -614,13 +616,24 @@
       btnAutoplay.title = autoplayEnabled ? 'Autoplay activé' : 'Autoplay désactivé';
     });
 
-    // Escape key closes the panel
+    // Escape key closes the panel.
+    // In fullscreen the browser exits fullscreen first — re-enter it so only the panel closes.
     document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape' && panel.style.display === 'block') {
+      if (e.key === 'Escape' && panelOpen) {
+        panelOpen = false;
         panel.style.display = 'none';
         btn.style.display = 'flex';
+        const fsEl = document.fullscreenElement;
+        if (fsEl) {
+          document.addEventListener('fullscreenchange', function reenter() {
+            document.removeEventListener('fullscreenchange', reenter);
+            if (!document.fullscreenElement) {
+              fsEl.requestFullscreen().catch(() => {});
+            }
+          });
+        }
       }
-    });
+    }, true);
 
     renderListFn = renderList;
   }
@@ -666,11 +679,14 @@
   // ---------------------------------------------------------------------------
   // Init + SPA navigation
   // ---------------------------------------------------------------------------
-  let uiBtn = null, uiPanel = null, renderListFn = null;
+  let uiBtn = null, uiPanel = null, renderListFn = null, panelOpen = false;
 
   function attachUI() {
     if (uiBtn && !document.body.contains(uiBtn)) document.body.appendChild(uiBtn);
     if (uiPanel && !document.body.contains(uiPanel)) document.body.appendChild(uiPanel);
+    // Restore open/closed state — YouTube may strip inline styles during SPA navigation
+    if (uiPanel) uiPanel.style.display = panelOpen ? 'block' : 'none';
+    if (uiBtn) uiBtn.style.display = panelOpen ? 'none' : 'flex';
   }
 
   buildUI();
@@ -689,7 +705,7 @@
     setTimeout(() => {
       updateDot();
       // Re-render and scroll to current video if panel is open
-      if (uiPanel && uiPanel.style.display === 'block') {
+      if (panelOpen) {
         renderListFn && renderListFn(true);
       }
     }, 500);
