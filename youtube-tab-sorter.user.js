@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Tab Sorter
 // @namespace    https://github.com/Alioune05/tampermonkey-scripts
-// @version      1.0.8
+// @version      1.0.9
 // @description  Track and sort your YouTube videos by duration via a floating panel
 // @match        *://www.youtube.com/watch*
 // @match        *://www.youtube.com/shorts/*
@@ -364,7 +364,7 @@
     const btnPrev = document.createElement('button');
     btnPrev.setAttribute('style', iconBtnStyle(false));
     btnPrev.title = 'Previous (Shift+P)';
-    btnPrev.appendChild(makeSvgIcon('M6 6h2v12H6zm3.5 6 8.5 6V6z'));
+    btnPrev.appendChild(makeSvgIcon('M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z'));
 
     // Skip+Remove (Shift+N): go to next and remove current from list
     const btnSkipRemove = document.createElement('button');
