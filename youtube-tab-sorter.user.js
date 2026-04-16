@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Tab Sorter
 // @namespace    https://github.com/Alioune05/tampermonkey-scripts
-// @version      1.0.6
+// @version      1.0.7
 // @description  Track and sort your YouTube videos by duration via a floating panel
 // @match        *://www.youtube.com/watch*
 // @match        *://www.youtube.com/shorts/*
@@ -21,9 +21,8 @@
 (function () {
   'use strict';
 
-  // Guard against re-injection on SPA navigation.
-  // window persists across YouTube's SPA navigations; getElementById does not (YouTube removes elements).
-  if (window.__ytsSorter) { window.__ytsSorter(); return; }
+  // Guard against double-injection on SPA navigation
+  if (document.getElementById('yts-btn')) return;
 
   // ---------------------------------------------------------------------------
   // Duration extraction
@@ -70,6 +69,7 @@
   const STORE_KEY    = 'yt_sorter_v1';
   const ORDER_KEY    = 'yt_sorter_order';
   const AUTOPLAY_KEY = 'yt_sorter_autoplay';
+  const PANEL_KEY    = 'yt_sorter_panel_open';
 
   function loadStore() {
     try { return JSON.parse(GM_getValue(STORE_KEY, '{}')); } catch (_) { return {}; }
@@ -534,14 +534,14 @@
     }
 
     btn.addEventListener('click', () => {
-      panelOpen = true;
+      GM_setValue(PANEL_KEY, true);
       panel.style.display = 'block';
       btn.style.display   = 'none';
       renderList(true);
     });
 
     closeBtn.addEventListener('click', () => {
-      panelOpen = false;
+      GM_setValue(PANEL_KEY, false);
       panel.style.display = 'none';
       btn.style.display   = 'flex';
     });
@@ -620,12 +620,11 @@
     // Escape key closes the panel.
     // In fullscreen the browser exits fullscreen first — re-enter it so only the panel closes.
     document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape' && panelOpen) {
-        panelOpen = false;
+      if (e.key === 'Escape' && GM_getValue(PANEL_KEY, false)) {
+        GM_setValue(PANEL_KEY, false);
         panel.style.display = 'none';
         btn.style.display = 'flex';
         if (document.fullscreenElement) {
-          // Browser will exit fullscreen on Escape — re-click YouTube's button to re-enter
           document.addEventListener('fullscreenchange', function reenter() {
             document.removeEventListener('fullscreenchange', reenter);
             if (!document.fullscreenElement) {
@@ -635,6 +634,13 @@
         }
       }
     }, true);
+
+    // Restore panel state from previous navigation
+    if (GM_getValue(PANEL_KEY, false)) {
+      panel.style.display = 'block';
+      btn.style.display   = 'none';
+      renderList(true);
+    }
 
     renderListFn = renderList;
   }
@@ -680,21 +686,19 @@
   // ---------------------------------------------------------------------------
   // Init + SPA navigation
   // ---------------------------------------------------------------------------
-  let uiBtn = null, uiPanel = null, renderListFn = null, panelOpen = false;
+  let uiBtn = null, uiPanel = null, renderListFn = null;
 
   function attachUI() {
     if (uiBtn && !document.body.contains(uiBtn)) document.body.appendChild(uiBtn);
     if (uiPanel && !document.body.contains(uiPanel)) document.body.appendChild(uiPanel);
-    // Restore open/closed state — YouTube may strip inline styles during SPA navigation
-    if (uiPanel) uiPanel.style.display = panelOpen ? 'block' : 'none';
-    if (uiBtn) uiBtn.style.display = panelOpen ? 'none' : 'flex';
+    const open = GM_getValue(PANEL_KEY, false);
+    if (uiPanel) uiPanel.style.display = open ? 'block' : 'none';
+    if (uiBtn) uiBtn.style.display = open ? 'none' : 'flex';
   }
 
   buildUI();
   uiBtn   = document.getElementById('yts-btn');
   uiPanel = document.getElementById('yts-panel');
-  // Expose attachUI on window so re-injections restore state without reinitializing
-  window.__ytsSorter = attachUI;
   registerCurrentVideo();
   attachEndedListener();
   updateDot();
@@ -708,7 +712,7 @@
     setTimeout(() => {
       updateDot();
       // Re-render and scroll to current video if panel is open
-      if (panelOpen) {
+      if (GM_getValue(PANEL_KEY, false)) {
         renderListFn && renderListFn(true);
       }
     }, 500);
