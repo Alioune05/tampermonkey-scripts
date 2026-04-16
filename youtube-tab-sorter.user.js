@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Tab Sorter
 // @namespace    https://github.com/Alioune05/tampermonkey-scripts
-// @version      1.0.1
+// @version      1.0.2
 // @description  Track and sort your YouTube videos by duration via a floating panel
 // @match        *://www.youtube.com/watch*
 // @match        *://www.youtube.com/shorts/*
@@ -359,6 +359,18 @@
     btnPause.title = 'Pause tous les onglets';
     btnPause.appendChild(makeSvgIcon('M6 19h4V5H6v14zm8-14v14h4V5h-4z'));
 
+    // Skip+Remove (Shift+N): go to next and remove current from list
+    const btnSkipRemove = document.createElement('button');
+    btnSkipRemove.setAttribute('style', iconBtnStyle(false));
+    btnSkipRemove.title = 'Next & remove (Shift+N)';
+    btnSkipRemove.appendChild(makeSvgIcon('M4 18l8.5-6L4 6v12zm9 0l8.5-6L13 6v12z'));
+
+    // Skip Keep (Ctrl+N): go to next without removing current from list
+    const btnSkipKeep = document.createElement('button');
+    btnSkipKeep.setAttribute('style', iconBtnStyle(false));
+    btnSkipKeep.title = 'Next (keep in list, Ctrl+N)';
+    btnSkipKeep.appendChild(makeSvgIcon('M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z'));
+
     const btnRefresh = document.createElement('button');
     btnRefresh.setAttribute('style', iconBtnStyle(false));
     btnRefresh.title = 'Refresh les durées';
@@ -389,6 +401,8 @@
     controls.appendChild(spacer);
 
     controls.appendChild(btnAutoplay);
+    controls.appendChild(btnSkipRemove);
+    controls.appendChild(btnSkipKeep);
     controls.appendChild(btnPause);
     controls.appendChild(btnRefresh);
     controls.appendChild(btnClear);
@@ -541,6 +555,28 @@
       renderList();
     });
 
+    btnSkipRemove.addEventListener('click', () => {
+      const vid = currentVid();
+      if (!vid) return;
+      const store = loadStore();
+      const items = sortedItems(store, GM_getValue(ORDER_KEY, 'asc'));
+      const currentIndex = items.findIndex(v => v.vid === vid);
+      const next = items[currentIndex + 1] ?? items[0];
+      delete store[vid];
+      saveStore(store);
+      if (next && next.vid !== vid) location.href = `https://www.youtube.com/watch?v=${next.vid}`;
+    });
+
+    btnSkipKeep.addEventListener('click', () => {
+      const vid = currentVid();
+      if (!vid) return;
+      const store = loadStore();
+      const items = sortedItems(store, GM_getValue(ORDER_KEY, 'asc'));
+      const currentIndex = items.findIndex(v => v.vid === vid);
+      const next = items[currentIndex + 1] ?? items[0];
+      if (next && next.vid !== vid) location.href = `https://www.youtube.com/watch?v=${next.vid}`;
+    });
+
     btnPause.addEventListener('click', () => {
       GM_setValue('yt_sorter_pause', Date.now());
       document.querySelector('video')?.pause();
@@ -568,7 +604,7 @@
     });
 
     btnUpdate.addEventListener('click', () => {
-      window.open('https://github.com/Alioune05/tampermonkey-scripts/raw/refs/heads/master/youtube-tab-sorter.user.js', '_blank');
+      window.open('https://raw.githubusercontent.com/Alioune05/tampermonkey-scripts/main/youtube-tab-sorter.user.js', '_blank');
     });
 
     btnAutoplay.addEventListener('click', () => {
