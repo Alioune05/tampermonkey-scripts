@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Tab Sorter
 // @namespace    https://github.com/Alioune05/tampermonkey-scripts
-// @version      1.0.2
+// @version      1.0.3
 // @description  Track and sort your YouTube videos by duration via a floating panel
 // @match        *://www.youtube.com/watch*
 // @match        *://www.youtube.com/shorts/*
@@ -215,7 +215,7 @@
           cursor:pointer; box-shadow:0 2px 8px rgba(0,0,0,0.4); white-space:nowrap;`,
 
     panel: `all:unset; box-sizing:border-box; position:fixed; top:120px; right:20px; z-index:${Z};
-            width:320px; background:#0f0f0f; color:#f1f1f1; border:1px solid #333; border-radius:10px;
+            width:360px; background:#0f0f0f; color:#f1f1f1; border:1px solid #333; border-radius:10px;
             font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
             box-shadow:0 8px 28px rgba(0,0,0,0.7); overflow:hidden; display:none;`,
 
@@ -324,7 +324,7 @@
 
     // Controls — icon bar
     const controls = document.createElement('div');
-    controls.setAttribute('style', 'display:flex; align-items:center; gap:6px; padding:8px 14px;');
+    controls.setAttribute('style', 'display:flex; align-items:center; gap:4px; padding:8px 14px;');
 
     const iconBtnStyle = (active) => `all:unset; box-sizing:border-box; width:34px; height:34px;
       display:flex; align-items:center; justify-content:center; border-radius:6px; cursor:pointer;
