@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Tab Sorter
 // @namespace    https://github.com/Alioune05/tampermonkey-scripts
-// @version      1.0.3
+// @version      1.0.4
 // @description  Track and sort your YouTube videos by duration via a floating panel
 // @match        *://www.youtube.com/watch*
 // @match        *://www.youtube.com/shorts/*
@@ -613,6 +613,16 @@
       btnAutoplay.setAttribute('style', iconBtnStyle(autoplayEnabled));
       btnAutoplay.title = autoplayEnabled ? 'Autoplay activé' : 'Autoplay désactivé';
     });
+
+    // Escape key closes the panel
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && panel.style.display === 'block') {
+        panel.style.display = 'none';
+        btn.style.display = 'flex';
+      }
+    });
+
+    renderListFn = renderList;
   }
 
   // ---------------------------------------------------------------------------
@@ -656,7 +666,7 @@
   // ---------------------------------------------------------------------------
   // Init + SPA navigation
   // ---------------------------------------------------------------------------
-  let uiBtn = null, uiPanel = null;
+  let uiBtn = null, uiPanel = null, renderListFn = null;
 
   function attachUI() {
     if (uiBtn && !document.body.contains(uiBtn)) document.body.appendChild(uiBtn);
@@ -676,7 +686,13 @@
     registerCurrentVideo();
     attachEndedListener();
     // Slight delay to let registerCurrentVideo save first
-    setTimeout(updateDot, 500);
+    setTimeout(() => {
+      updateDot();
+      // Re-render and scroll to current video if panel is open
+      if (uiPanel && uiPanel.style.display === 'block') {
+        renderListFn && renderListFn(true);
+      }
+    }, 500);
   });
 
   // ---------------------------------------------------------------------------
