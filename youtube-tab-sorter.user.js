@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         YouTube Tab Sorter
 // @namespace    https://github.com/Alioune05/tampermonkey-scripts
-// @version      1.0.9
+// @version      1.3.0
 // @description  Track and sort your YouTube videos by duration via a floating panel
-// @match        *://www.youtube.com/watch*
-// @match        *://www.youtube.com/shorts/*
+// @match        *://www.youtube.com/*
+// @match        *://youtube.com/*
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_addValueChangeListener
@@ -27,21 +27,34 @@
   // ---------------------------------------------------------------------------
   // Duration extraction
   // ---------------------------------------------------------------------------
-  function getDuration() {
-    const video = document.querySelector('video');
-    if (video && video.duration && isFinite(video.duration)) return Math.round(video.duration);
+  // Player metadata for the requested video, or null if the page still holds
+  // the previous video's data (SPA navigation updates it asynchronously).
+  function videoDetails(vid) {
+    try {
+      const details = window.ytInitialPlayerResponse?.videoDetails;
+      if (!details) return null;
+      if (vid && details.videoId && details.videoId !== vid) return null;
+      return details;
+    } catch (_) { return null; }
+  }
 
-    const el = document.querySelector('.ytp-time-duration');
-    if (el && el.textContent) {
-      const parts = el.textContent.trim().split(':').map(Number);
-      if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
-      if (parts.length === 2) return parts[0] * 60 + parts[1];
+  // While an ad plays, the <video> element and the progress bar describe the
+  // ad, not the video: metadata is then the only trustworthy source.
+  function getDuration(vid) {
+    if (!isAdPlaying()) {
+      const video = document.querySelector('video');
+      if (video && video.duration && isFinite(video.duration)) return Math.round(video.duration);
+
+      const el = document.querySelector('.ytp-time-duration');
+      if (el && el.textContent) {
+        const parts = el.textContent.trim().split(':').map(Number);
+        if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+        if (parts.length === 2) return parts[0] * 60 + parts[1];
+      }
     }
 
-    try {
-      const seconds = window.ytInitialPlayerResponse?.videoDetails?.lengthSeconds;
-      if (seconds) return parseInt(seconds, 10);
-    } catch (_) {}
+    const seconds = videoDetails(vid)?.lengthSeconds;
+    if (seconds) return parseInt(seconds, 10);
 
     return null;
   }
@@ -53,6 +66,10 @@
     const sec = s % 60;
     if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
     return `${m}:${String(sec).padStart(2, '0')}`;
+  }
+
+  function isVideoPage() {
+    return location.pathname === '/watch' || location.pathname.startsWith('/shorts/');
   }
 
   function currentVid() {
@@ -70,6 +87,8 @@
   const ORDER_KEY    = 'yt_sorter_order';
   const AUTOPLAY_KEY = 'yt_sorter_autoplay';
   const PANEL_KEY    = 'yt_sorter_panel_open';
+  const CURSOR_KEY   = 'yt_sorter_cursor';
+  const SYNC_KEY     = 'yt_sorter_sync';
 
   function loadStore() {
     try { return JSON.parse(GM_getValue(STORE_KEY, '{}')); } catch (_) { return {}; }
@@ -94,31 +113,306 @@
     });
   }
 
-  // Fetch duration + title for a video ID by scraping the YouTube page
+  // ---------------------------------------------------------------------------
+  // Navigation: find where we are in the sorted list
+  // ---------------------------------------------------------------------------
+
+  // Remember the slot the current video occupies so we can resume from there
+  // even after it disappears from the list.
+  function saveCursor(items, vid) {
+    const index = items.findIndex(v => v.vid === vid);
+    if (index !== -1) GM_setValue(CURSOR_KEY, JSON.stringify({ vid, index }));
+  }
+
+  function readCursor(vid) {
+    try {
+      const cursor = JSON.parse(GM_getValue(CURSOR_KEY, 'null'));
+      return cursor && cursor.vid === vid ? cursor.index : null;
+    } catch (_) { return null; }
+  }
+
+  // Returns the slot of the current video, plus whether it is still listed.
+  // A video absent from the list (already removed, or not registered yet)
+  // falls back to its last known slot: without it, navigation would restart
+  // at the top of the list.
+  function locate(items, vid) {
+    const index = items.findIndex(v => v.vid === vid);
+    if (index !== -1) return { index, present: true };
+    const saved = readCursor(vid);
+    if (saved == null) return { index: -1, present: false };
+    return { index: Math.min(saved, items.length), present: false };
+  }
+
+  function nextItem(items, vid) {
+    if (items.length === 0) return null;
+    const { index, present } = locate(items, vid);
+    if (index === -1) return items[0];
+    // When the video is gone from the list, its old slot already holds the
+    // one that came after it.
+    return items[present ? index + 1 : index] ?? items[0];
+  }
+
+  function prevItem(items, vid) {
+    if (items.length === 0) return null;
+    const { index } = locate(items, vid);
+    if (index === -1) return items[items.length - 1];
+    return items[index - 1] ?? items[items.length - 1];
+  }
+
+  // Parse duration + title + channel out of a (possibly partial) watch page
+  function parseVideoData(html) {
+    try {
+      const unescape = s => s
+        ?.replace(/\\u0026/g, '&').replace(/\\u0027/g, "'")
+        .replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+      const seconds = html.match(/"lengthSeconds":"(\d+)"/)?.[1];
+      return {
+        duration: seconds ? parseInt(seconds, 10) : null,
+        title: unescape(html.match(/"title":"((?:[^"\\]|\\.)*)"/)?.[1]) || null,
+        channel: unescape(html.match(/"author":"((?:[^"\\]|\\.)*)"/)?.[1]) || null,
+      };
+    } catch (_) { return { duration: null, title: null, channel: null }; }
+  }
+
+  // Simultaneous refresh requests. YouTube is HTTP/2 so this isn't capped by
+  // the 6-connections-per-host limit, but going much higher risks 429s.
+  const REFRESH_CONCURRENCY = 20;
+
+  // Re-scanning the buffer on every chunk is O(n²) over a download, so only
+  // retry the match once this much new text has arrived.
+  const SCAN_STEP = 128 * 1024;
+
+  // Transient failures (network, timeout, 429, 5xx) are retried with backoff.
+  // A 200 without lengthSeconds means the video is gone or private, so it is
+  // not retried.
+  const REFRESH_RETRIES = 5;
+  const RETRY_BASE_DELAY = 600;
+  const RETRY_MAX_DELAY = 5000;
+
+  const failedData = (retryable) => ({ duration: null, title: null, channel: null, retryable });
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+  // Fetch duration + title for a video ID by scraping the YouTube page.
+  // The player response sits near the top of the HTML, so the request is
+  // aborted as soon as the three fields are found instead of downloading
+  // the whole (multi-MB) page.
   function fetchVideoData(vid) {
     return new Promise((resolve) => {
-      GM_xmlhttpRequest({
+      let settled = false;
+      let handle = null;
+      let scanned = 0;
+      const finish = (data, abort) => {
+        if (settled) return;
+        settled = true;
+        if (abort) { try { handle?.abort?.(); } catch (_) {} }
+        resolve(data);
+      };
+      handle = GM_xmlhttpRequest({
         method: 'GET',
         url: `https://www.youtube.com/watch?v=${vid}`,
-        onload: (res) => {
-          try {
-            const seconds = res.responseText.match(/"lengthSeconds":"(\d+)"/)?.[1];
-            const unescape = s => s
-              ?.replace(/\\u0026/g, '&').replace(/\\u0027/g, "'")
-              .replace(/\\"/g, '"').replace(/\\\\/g, '\\');
-            const title   = unescape(res.responseText.match(/"title":"((?:[^"\\]|\\.)*)"/)?.[1]);
-            const channel = unescape(res.responseText.match(/"author":"((?:[^"\\]|\\.)*)"/)?.[1]);
-            resolve({
-              duration: seconds ? parseInt(seconds, 10) : null,
-              title: title || null,
-              channel: channel || null,
-            });
-          } catch (_) { resolve({ duration: null, title: null }); }
+        timeout: 20000,
+        onreadystatechange: (res) => {
+          if (settled || res.readyState !== 3) return;
+          const text = res.responseText;
+          if (!text || text.length - scanned < SCAN_STEP) return;
+          scanned = text.length;
+          const data = parseVideoData(text);
+          if (data.duration != null && data.title && data.channel) {
+            finish({ ...data, retryable: false }, true);
+          }
         },
-        onerror: () => resolve({ duration: null, title: null }),
+        onload: (res) => {
+          const data = parseVideoData(res.responseText || '');
+          finish({ ...data, retryable: data.duration == null && res.status !== 200 });
+        },
+        onerror:   () => finish(failedData(true)),
+        ontimeout: () => finish(failedData(true)),
       });
     });
   }
+
+  async function fetchVideoDataRetrying(vid) {
+    for (let attempt = 0; ; attempt++) {
+      const data = await fetchVideoData(vid);
+      if (!data.retryable || attempt >= REFRESH_RETRIES) return data;
+      const delay = Math.min(RETRY_BASE_DELAY * (2 ** attempt), RETRY_MAX_DELAY);
+      await sleep(delay + Math.random() * 300);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Sync: resumable, progressive duration refresh
+  // ---------------------------------------------------------------------------
+  // A page load tears the script down, so the queue lives in shared storage and
+  // every result is written to the store as soon as it arrives. Whichever page
+  // comes next picks the queue back up where it stopped, and other tabs see the
+  // durations appear live instead of waiting for the whole run.
+  //
+  // Shape of the shared record:
+  //   { pending: [vid], total: n, failed: n, owner: tabId|null, beat: ms }
+  // `pending` empty means the run is over; `owner` + `beat` are the lock that
+  // keeps two tabs from fetching the same queue.
+  const SYNC_COMMIT_DELAY = 400;
+  const SYNC_HEARTBEAT = 2000;
+  // Jittered so two tabs don't grab the same abandoned queue on the same tick.
+  const SYNC_STALE = 6000 + Math.floor(Math.random() * 2000);
+
+  const TAB_ID = Math.random().toString(36).slice(2);
+
+  let syncUiFn = null;   // set by buildUI, refreshes the sync button
+  let syncState = null;  // this tab's copy of the queue, while it owns it
+  let syncRunning = false;
+  let syncResults = {};  // fetched data not written to the store yet
+  let commitTimer = null;
+
+  function loadSync() {
+    try {
+      const state = JSON.parse(GM_getValue(SYNC_KEY, 'null'));
+      return state && Array.isArray(state.pending) ? state : null;
+    } catch (_) { return null; }
+  }
+
+  function syncProgress() {
+    const state = loadSync();
+    if (!state) return null;
+    return {
+      total: state.total,
+      done: state.total - state.pending.length,
+      failed: state.failed,
+      running: state.pending.length > 0,
+    };
+  }
+
+  function writeSync() {
+    GM_setValue(SYNC_KEY, JSON.stringify(syncState));
+    syncUiFn && syncUiFn();
+  }
+
+  // Another tab may have queued videos on top of ours; adopt them so its click
+  // isn't silently dropped by our next write.
+  function adoptQueuedVideos() {
+    const stored = loadSync();
+    if (!stored) return;
+    const known = new Set(syncState.pending.concat(Object.keys(syncResults)));
+    const added = stored.pending.filter(vid => !known.has(vid));
+    if (added.length === 0) return;
+    syncState.pending = syncState.pending.concat(added);
+    syncState.total += added.length;
+  }
+
+  // Merge into a freshly read store instead of a snapshot: videos added or
+  // deleted while the fetch runs (possibly from another tab) would otherwise
+  // be resurrected or wiped.
+  function commitSync() {
+    clearTimeout(commitTimer);
+    commitTimer = null;
+
+    const results = syncResults;
+    syncResults = {};
+    const store = loadStore();
+    for (const [vid, data] of Object.entries(results)) {
+      if (!store[vid]) continue;
+      if (data.duration) store[vid].duration = data.duration;
+      if (data.title)    store[vid].title    = data.title;
+      if (data.channel)  store[vid].channel  = data.channel;
+    }
+    saveStore(store);
+
+    adoptQueuedVideos();
+    const settled = new Set(Object.keys(results));
+    syncState.pending = syncState.pending.filter(vid => !settled.has(vid) && store[vid]);
+    writeSync();
+
+    renderListFn && renderListFn();
+    updateTotal();
+  }
+
+  function scheduleCommit() {
+    if (!commitTimer) commitTimer = setTimeout(commitSync, SYNC_COMMIT_DELAY);
+  }
+
+  async function runSync() {
+    if (syncRunning || !syncState || syncState.pending.length === 0) return;
+    syncRunning = true;
+    syncState.owner = TAB_ID;
+    syncState.beat = Date.now();
+    writeSync();
+
+    const beat = setInterval(() => {
+      syncState.beat = Date.now();
+      writeSync();
+    }, SYNC_HEARTBEAT);
+
+    // The queue can grow mid-run, so lanes read it live rather than iterating
+    // a fixed list, and the outer loop restarts them if anything was added.
+    const inFlight = new Set();
+    const take = () => syncState.pending.find(vid => !inFlight.has(vid) && !(vid in syncResults));
+
+    do {
+      await Promise.all(Array.from({ length: REFRESH_CONCURRENCY }, async () => {
+        for (;;) {
+          const vid = take();
+          if (!vid) {
+            if (inFlight.size === 0) return;
+            await sleep(100);
+            continue;
+          }
+          inFlight.add(vid);
+          const data = await fetchVideoDataRetrying(vid);
+          inFlight.delete(vid);
+          syncResults[vid] = data;
+          if (data.duration == null) syncState.failed++;
+          scheduleCommit();
+        }
+      }));
+      commitSync();
+    } while (syncState.pending.length > 0);
+
+    clearInterval(beat);
+    syncState.owner = null;
+    syncRunning = false;
+    writeSync();
+  }
+
+  // Queue `vids`, merging with a run already in progress, and start fetching
+  // unless another tab is on it.
+  function startSync(vids) {
+    const stored = loadSync();
+    if (syncRunning) {
+      adoptQueuedVideos();
+    } else if (stored && stored.pending.length > 0) {
+      syncState = stored;
+    } else {
+      syncState = { pending: [], total: 0, failed: 0, owner: null, beat: 0 };
+    }
+
+    const known = new Set(syncState.pending.concat(Object.keys(syncResults)));
+    const added = vids.filter(vid => !known.has(vid));
+    syncState.pending = syncState.pending.concat(added);
+    syncState.total += added.length;
+    writeSync();
+
+    resumeSync();
+  }
+
+  // Take over a queue whose owner went away: page reloaded, or tab closed.
+  function resumeSync() {
+    if (syncRunning) return;
+    const stored = loadSync();
+    if (!stored || stored.pending.length === 0) return;
+    if (stored.owner && stored.owner !== TAB_ID && Date.now() - (stored.beat || 0) < SYNC_STALE) return;
+    syncState = stored;
+    runSync();
+  }
+
+  // Hand the queue over immediately on navigation instead of waiting for the
+  // lock to go stale, and keep the results already fetched.
+  window.addEventListener('pagehide', () => {
+    if (!syncRunning) return;
+    syncState.owner = null;
+    syncState.beat = 0;
+    commitSync();
+  });
 
   function isAdPlaying() {
     const player = document.querySelector('.html5-video-player');
@@ -127,7 +421,7 @@
 
   function waitForAdToEnd(callback) {
     const player = document.querySelector('.html5-video-player');
-    if (!player) { callback(); return; }
+    if (!player || !isAdPlaying()) { callback(); return; }
     const observer = new MutationObserver(() => {
       if (!player.classList.contains('ad-showing') && !player.classList.contains('ad-interrupting')) {
         observer.disconnect();
@@ -137,21 +431,38 @@
     observer.observe(player, { attributes: true, attributeFilter: ['class'] });
   }
 
-  function registerCurrentVideo(attempt = 0) {
+  // A pre-roll ad must not delay registration, so the video is stored right
+  // away from metadata and re-read once the ad is over, in case the player
+  // had not exposed its metadata yet.
+  let waitingForAd = false;
+
+  function registerAfterAd() {
+    if (waitingForAd || !isAdPlaying()) return;
+    waitingForAd = true;
+    waitForAdToEnd(() => {
+      waitingForAd = false;
+      registerCurrentVideo(0);
+    });
+  }
+
+  // Each fresh call supersedes the retry chain of the previous one, so several
+  // navigation signals for the same page don't stack up retry loops.
+  let registerRun = 0;
+
+  function registerCurrentVideo(attempt = 0, run = ++registerRun) {
+    if (run !== registerRun) return;
+    if (!isVideoPage()) return;
     const vid = currentVid();
     if (!vid) return;
 
-    // Wait for ad to finish before reading duration
-    if (isAdPlaying()) {
-      waitForAdToEnd(() => registerCurrentVideo(0));
-      return;
-    }
+    registerAfterAd();
 
-    const duration = getDuration();
-    const title = window.ytInitialPlayerResponse?.videoDetails?.title
+    const details = videoDetails(vid);
+    const duration = getDuration(vid);
+    const title = details?.title
       || document.title.replace(/ - YouTube$/, '').trim()
       || vid;
-    const channel = window.ytInitialPlayerResponse?.videoDetails?.author
+    const channel = details?.author
       || document.querySelector('#channel-name a, #owner-name a, .ytd-channel-name a')?.textContent?.trim()
       || '';
 
@@ -160,21 +471,25 @@
     const store = loadStore();
     // Preserve isShort=true if already set — YouTube redirects /shorts/id to /watch?v=id
     const isShort = location.pathname.startsWith('/shorts/') || !!store[vid]?.isShort;
+    // The player may not expose the duration yet: keep the known one rather
+    // than nulling it, which would send the video to the end of the list
+    const knownDuration = duration ?? store[vid]?.duration ?? null;
     // Don't overwrite a good title with a generic one
     if (!titleIsGeneric || !store[vid]?.title || store[vid].title === vid) {
-      store[vid] = { vid, title, channel, duration, isShort, ts: Date.now() };
+      store[vid] = { vid, title, channel, duration: knownDuration, isShort, ts: Date.now() };
       saveStore(store);
     } else {
-      store[vid].duration = duration;
+      store[vid].duration = knownDuration;
       store[vid].isShort = isShort;
       if (channel) store[vid].channel = channel;
       saveStore(store);
     }
 
+    saveCursor(sortedItems(store, GM_getValue(ORDER_KEY, 'asc')), vid);
+    updateDot();
+
     if ((duration == null || titleIsGeneric) && attempt < 15) {
-      setTimeout(() => registerCurrentVideo(attempt + 1), 1000);
-    } else {
-      updateDot();
+      setTimeout(() => registerCurrentVideo(attempt + 1, run), 1000);
     }
   }
 
@@ -182,10 +497,15 @@
   function updateDot() {
     const dot = document.getElementById('yts-dot');
     if (!dot) return;
-    const vid = currentVid();
-    const inList = vid && !!loadStore()[vid];
+    const vid = isVideoPage() ? currentVid() : null;
+    if (!vid) {
+      dot.style.background = '#555';
+      dot.title = 'Pas sur une vidéo';
+      return;
+    }
+    const inList = !!loadStore()[vid];
     dot.style.background = inList ? '#4caf50' : '#f44336';
-    dot.title = inList ? 'Vidéo suivie ✓' : 'Pas dans la liste — recharge si besoin';
+    dot.title = inList ? 'Vidéo suivie ✓' : 'Pas dans la liste';
   }
 
   function updateTotal() {
@@ -570,9 +890,8 @@
       if (!vid) return;
       const store = loadStore();
       const items = sortedItems(store, GM_getValue(ORDER_KEY, 'asc'));
-      const currentIndex = items.findIndex(v => v.vid === vid);
-      const prev = currentIndex > 0 ? items[currentIndex - 1] : items[items.length - 1];
-      if (prev && prev.vid !== vid) location.href = `https://www.youtube.com/watch?v=${prev.vid}`;
+      const prev = prevItem(items, vid);
+      if (prev && prev.vid !== vid) goToVideo(prev.vid);
     });
 
     btnSkipRemove.addEventListener('click', () => {
@@ -580,11 +899,10 @@
       if (!vid) return;
       const store = loadStore();
       const items = sortedItems(store, GM_getValue(ORDER_KEY, 'asc'));
-      const currentIndex = items.findIndex(v => v.vid === vid);
-      const next = items[currentIndex + 1] ?? items[0];
+      const next = nextItem(items, vid);
       delete store[vid];
       saveStore(store);
-      if (next && next.vid !== vid) location.href = `https://www.youtube.com/watch?v=${next.vid}`;
+      if (next && next.vid !== vid) goToVideo(next.vid);
     });
 
     btnSkipKeep.addEventListener('click', () => {
@@ -592,9 +910,8 @@
       if (!vid) return;
       const store = loadStore();
       const items = sortedItems(store, GM_getValue(ORDER_KEY, 'asc'));
-      const currentIndex = items.findIndex(v => v.vid === vid);
-      const next = items[currentIndex + 1] ?? items[0];
-      if (next && next.vid !== vid) location.href = `https://www.youtube.com/watch?v=${next.vid}`;
+      const next = nextItem(items, vid);
+      if (next && next.vid !== vid) goToVideo(next.vid);
     });
 
     btnPause.addEventListener('click', () => {
@@ -602,25 +919,36 @@
       document.querySelector('video')?.pause();
     });
 
-    btnRefresh.addEventListener('click', async () => {
+    const REFRESH_TITLE = 'Refresh les durées (shift = tout refetch)';
+    btnRefresh.title = REFRESH_TITLE;
+
+    // Reflects the shared queue, so the spinner and the counter survive a page
+    // load and show what another tab is fetching.
+    function updateRefreshUi() {
       const svg = btnRefresh.querySelector('svg');
-      if (svg) svg.style.animation = 'yts-spin 0.8s linear infinite';
-      btnRefresh.style.pointerEvents = 'none';
-
-      const store = loadStore();
-      const vids = Object.keys(store);
-
-      for (const vid of vids) {
-        const data = await fetchVideoData(vid);
-        if (data.duration) store[vid].duration = data.duration;
-        if (data.title)    store[vid].title    = data.title;
-        if (data.channel)  store[vid].channel  = data.channel;
+      const progress = syncProgress();
+      if (progress && progress.running) {
+        if (svg) svg.style.animation = 'yts-spin 0.8s linear infinite';
+        btnRefresh.title = `Sync ${progress.done}/${progress.total}`;
+        return;
       }
-
-      saveStore(store);
-      renderList();
       if (svg) svg.style.animation = '';
-      btnRefresh.style.pointerEvents = '';
+      btnRefresh.title = progress && progress.failed
+        ? `${progress.failed} échec(s) : reclique pour réessayer`
+        : REFRESH_TITLE;
+    }
+
+    btnRefresh.addEventListener('click', (e) => {
+      const store = loadStore();
+      const force = e.shiftKey;
+      const vids = Object.keys(store).filter(vid => {
+        if (force) return true;
+        const v = store[vid];
+        return v.duration == null || !v.title || v.title === vid || !v.channel;
+      });
+
+      if (vids.length === 0) { renderList(); return; }
+      startSync(vids);
     });
 
     btnUpdate.addEventListener('click', () => {
@@ -660,6 +988,8 @@
     }
 
     renderListFn = renderList;
+    syncUiFn = updateRefreshUi;
+    updateRefreshUi();
   }
 
   // ---------------------------------------------------------------------------
@@ -670,14 +1000,65 @@
   });
 
   // ---------------------------------------------------------------------------
+  // Mirror what the tab running the sync writes, entry by entry
+  // ---------------------------------------------------------------------------
+  GM_addValueChangeListener(STORE_KEY, (key, oldValue, newValue, remote) => {
+    if (!remote) return;
+    renderListFn && renderListFn();
+    updateTotal();
+    updateDot();
+  });
+
+  GM_addValueChangeListener(SYNC_KEY, (key, oldValue, newValue, remote) => {
+    if (remote) syncUiFn && syncUiFn();
+  });
+
+  // ---------------------------------------------------------------------------
+  // Navigation
+  // ---------------------------------------------------------------------------
+  // Assigning location.href reloads the whole page, which kills an in-flight
+  // sync. YouTube's own SPA navigation keeps the script (and the sync) alive,
+  // so it is asked first; if the URL hasn't changed shortly after, the internal
+  // event was ignored and a plain reload takes over.
+  const SPA_NAV_TIMEOUT = 900;
+
+  function goToVideo(vid) {
+    const url = `/watch?v=${vid}`;
+    const app = document.querySelector('ytd-app');
+    if (!app) { location.href = url; return; }
+    const from = location.href;
+    try {
+      app.dispatchEvent(new CustomEvent('yt-navigate', {
+        bubbles: true,
+        composed: true,
+        detail: {
+          endpoint: {
+            watchEndpoint: { videoId: vid },
+            commandMetadata: { webCommandMetadata: { url, webPageType: 'WEB_PAGE_TYPE_WATCH' } },
+          },
+        },
+      }));
+    } catch (_) {
+      location.href = url;
+      return;
+    }
+    // A URL that moved elsewhere means the user navigated meanwhile: leave it.
+    setTimeout(() => { if (location.href === from) location.href = url; }, SPA_NAV_TIMEOUT);
+  }
+
+  // ---------------------------------------------------------------------------
   // Autoplay next: when video ends, remove it and navigate to the next one
   // ---------------------------------------------------------------------------
-  let endedListenerAttached = false;
+  // The element is tracked instead of a boolean: YouTube can swap the <video>
+  // on navigation, and hover previews on the home page use their own element
+  // whose 'ended' must not trigger navigation.
+  let endedListenerTarget = null;
 
   function attachEndedListener() {
+    if (!isVideoPage()) return;
     const video = document.querySelector('video');
-    if (!video || endedListenerAttached) return;
-    endedListenerAttached = true;
+    if (!video || video === endedListenerTarget) return;
+    endedListenerTarget = video;
 
     video.addEventListener('ended', () => {
       if (!GM_getValue(AUTOPLAY_KEY, true)) return;
@@ -688,14 +1069,13 @@
       const store = loadStore();
       const order = GM_getValue(ORDER_KEY, 'asc');
       const items = sortedItems(store, order);
-      const currentIndex = items.findIndex(v => v.vid === vid);
-      const next = items[currentIndex + 1] ?? items[0]; // retour au début si dernière
+      const next = nextItem(items, vid); // retour au début si dernière
 
       delete store[vid];
       saveStore(store);
 
       if (next && next.vid !== vid) {
-        location.href = `https://www.youtube.com/watch?v=${next.vid}`;
+        goToVideo(next.vid);
       }
     });
   }
@@ -716,15 +1096,12 @@
   buildUI();
   uiBtn   = document.getElementById('yts-btn');
   uiPanel = document.getElementById('yts-panel');
-  registerCurrentVideo();
-  attachEndedListener();
-  updateDot();
 
-  document.addEventListener('yt-navigate-finish', () => {
-    endedListenerAttached = false;
+  function onPage() {
     attachUI();
     registerCurrentVideo();
     attachEndedListener();
+    resumeSync();
     // Slight delay to let registerCurrentVideo save first
     setTimeout(() => {
       updateDot();
@@ -733,7 +1110,29 @@
         renderListFn && renderListFn(true);
       }
     }, 500);
-  });
+  }
+
+  onPage();
+
+  // yt-navigate-finish covers YouTube's own SPA navigation, but it is missed
+  // when the script loads while a navigation is already in flight, and it does
+  // not always fire on back/forward. Polling the URL catches the rest.
+  document.addEventListener('yt-navigate-finish', onPage);
+  window.addEventListener('popstate', onPage);
+
+  let lastUrl = location.href;
+  setInterval(() => {
+    if (location.href !== lastUrl) {
+      lastUrl = location.href;
+      onPage();
+      return;
+    }
+    // The button stays on every YouTube page, so put it back whenever YouTube
+    // wipes the part of the DOM it lives in.
+    if (uiBtn && !document.body.contains(uiBtn)) attachUI();
+    // Also covers the tab that owned the queue being closed mid-sync.
+    resumeSync();
+  }, 1000);
 
   // ---------------------------------------------------------------------------
   // Shortcut: Shift+N → skip to next video and remove current from list
@@ -746,14 +1145,13 @@
       const store = loadStore();
       const order = GM_getValue(ORDER_KEY, 'asc');
       const items = sortedItems(store, order);
-      const currentIndex = items.findIndex(v => v.vid === vid);
-      const next = items[currentIndex + 1] ?? items[0]; // retour au début si dernière
+      const next = nextItem(items, vid); // retour au début si dernière
 
       delete store[vid];
       saveStore(store);
 
       if (next && next.vid !== vid) {
-        location.href = `https://www.youtube.com/watch?v=${next.vid}`;
+        goToVideo(next.vid);
       }
     }
   });
@@ -769,11 +1167,10 @@
       const store = loadStore();
       const order = GM_getValue(ORDER_KEY, 'asc');
       const items = sortedItems(store, order);
-      const currentIndex = items.findIndex(v => v.vid === vid);
-      const next = items[currentIndex + 1] ?? items[0];
+      const next = nextItem(items, vid);
 
       if (next && next.vid !== vid) {
-        location.href = `https://www.youtube.com/watch?v=${next.vid}`;
+        goToVideo(next.vid);
       }
     }
   });
@@ -789,11 +1186,10 @@
       const store = loadStore();
       const order = GM_getValue(ORDER_KEY, 'asc');
       const items = sortedItems(store, order);
-      const currentIndex = items.findIndex(v => v.vid === vid);
-      const prev = currentIndex > 0 ? items[currentIndex - 1] : items[items.length - 1];
+      const prev = prevItem(items, vid);
 
       if (prev && prev.vid !== vid) {
-        location.href = `https://www.youtube.com/watch?v=${prev.vid}`;
+        goToVideo(prev.vid);
       }
     }
   });
