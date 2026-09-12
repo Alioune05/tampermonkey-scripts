@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Tab Sorter
 // @namespace    https://github.com/Alioune05/tampermonkey-scripts
-// @version      1.3.0
+// @version      1.3.1
 // @description  Track and sort your YouTube videos by duration via a floating panel
 // @match        *://www.youtube.com/*
 // @match        *://youtube.com/*
@@ -11,8 +11,8 @@
 // @grant        GM_xmlhttpRequest
 // @connect      www.youtube.com
 // @run-at       document-idle
-// @updateURL    https://raw.githubusercontent.com/Alioune05/tampermonkey-scripts/master/youtube-tab-sorter.user.js
-// @downloadURL  https://raw.githubusercontent.com/Alioune05/tampermonkey-scripts/master/youtube-tab-sorter.user.js
+// @updateURL    https://raw.githubusercontent.com/Alioune05/tampermonkey-scripts/main/youtube-tab-sorter.user.js
+// @downloadURL  https://raw.githubusercontent.com/Alioune05/tampermonkey-scripts/main/youtube-tab-sorter.user.js
 // @homepageURL  https://github.com/Alioune05/tampermonkey-scripts
 // @supportURL   https://github.com/Alioune05/tampermonkey-scripts/issues
 // @icon         https://www.youtube.com/favicon.ico
@@ -1017,9 +1017,10 @@
   // Navigation
   // ---------------------------------------------------------------------------
   // Assigning location.href reloads the whole page, which kills an in-flight
-  // sync. YouTube's own SPA navigation keeps the script (and the sync) alive,
-  // so it is asked first; if the URL hasn't changed shortly after, the internal
-  // event was ignored and a plain reload takes over.
+  // sync. Clicking a real link inside ytd-app lets YouTube's router take it as
+  // an internal navigation and keep the script (and the sync) alive; when the
+  // router doesn't pick it up, the browser navigates for real, so the click
+  // can't end up doing nothing.
   const SPA_NAV_TIMEOUT = 900;
 
   function goToVideo(vid) {
@@ -1027,21 +1028,12 @@
     const app = document.querySelector('ytd-app');
     if (!app) { location.href = url; return; }
     const from = location.href;
-    try {
-      app.dispatchEvent(new CustomEvent('yt-navigate', {
-        bubbles: true,
-        composed: true,
-        detail: {
-          endpoint: {
-            watchEndpoint: { videoId: vid },
-            commandMetadata: { webCommandMetadata: { url, webPageType: 'WEB_PAGE_TYPE_WATCH' } },
-          },
-        },
-      }));
-    } catch (_) {
-      location.href = url;
-      return;
-    }
+    const link = document.createElement('a');
+    link.href = url;
+    link.style.display = 'none';
+    app.appendChild(link);
+    link.click();
+    link.remove();
     // A URL that moved elsewhere means the user navigated meanwhile: leave it.
     setTimeout(() => { if (location.href === from) location.href = url; }, SPA_NAV_TIMEOUT);
   }
